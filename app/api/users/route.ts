@@ -1,65 +1,109 @@
 import { type NextRequest, NextResponse } from "next/server"
-
-// Dummy user data for admin management
-const DUMMY_USERS_DATA = [
-  {
-    id: "1",
-    name: "John Doe",
-    email: "john@example.com",
-    role: "client",
-    status: "active",
-    joinDate: "2024-01-10",
-    lastActive: "2024-01-15",
-    applications: 12,
-    profileComplete: 85,
-  },
-  {
-    id: "2",
-    name: "Jane Smith",
-    email: "jane@example.com",
-    role: "client",
-    status: "active",
-    joinDate: "2024-01-08",
-    lastActive: "2024-01-14",
-    applications: 8,
-    profileComplete: 92,
-  },
-  {
-    id: "3",
-    name: "TechCorp Inc.",
-    email: "hr@techcorp.com",
-    role: "company",
-    status: "active",
-    joinDate: "2024-01-05",
-    lastActive: "2024-01-15",
-    jobsPosted: 5,
-    profileComplete: 90,
-  },
-]
+import { db } from "@/lib/db"
+import { users, candidates, companies, applications, jobs } from "@/lib/schema"
+import { eq, ilike, and, count } from "drizzle-orm"
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const role = searchParams.get("role")
-  const status = searchParams.get("status")
-  const search = searchParams.get("search")
+  try {
+    const { searchParams } = new URL(request.url)
+    const role = searchParams.get("role")
+    const status = searchParams.get("status")
+    const search = searchParams.get("search")
+    const limit = parseInt(searchParams.get("limit") || "50")
+    const offset = parseInt(searchParams.get("offset") || "0")
 
-  let filteredUsers = DUMMY_USERS_DATA
+    // Build query conditions
+    const conditions = []
 
-  if (role) {
-    filteredUsers = filteredUsers.filter((user) => user.role === role)
-  }
+    if (role) {
+      conditions.push(eq(users.role, role))
+    }
 
-  if (status) {
-    filteredUsers = filteredUsers.filter((user) => user.status === status)
-  }
+    if (status) {
+      conditions.push(eq(users.status, status))
+    }
 
-  if (search) {
-    filteredUsers = filteredUsers.filter(
-      (user) =>
-        user.name.toLowerCase().includes(search.toLowerCase()) ||
-        user.email.toLowerCase().includes(search.toLowerCase()),
+    if (search) {
+      conditions.push(
+        ilike(users.firstName, `%${search}%`)
+      )
+    }
+
+    // Fetch users from database
+    const usersData = await db
+      .select({
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        role: users.role,
+        status: users.status,
+        createdAt: users.createdAt,
+        updatedAt: users.updatedAt,
+      })
+      .from(users)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .limit(limit)
+      .offset(offset)
+      .orderBy(users.createdAt)
+
+    // Get additional statistics for each user
+    const usersWithStats = await Promise.all(
+      usersData.map(async (user) => {
+        let additionalStats = {}
+
+        if (user.role === 'client') {
+          // Get candidate profile and application count
+          const candidateProfile = await db
+            .select()
+            .from(candidates)
+            .where(eq(candidates.userId, user.id))
+            .limit(1)
+
+          const applicationCount = await db
+            .select({ count: count() })
+            .from(applications)
+            .where(eq(applications.candidateId, candidateProfile[0]?.id || ''))
+
+          additionalStats = {
+            applications: applicationCount[0]?.count || 0,
+            profileComplete: candidateProfile[0] ? 85 : 20, // Simple calculation
+          }
+        } else if (user.role === 'company') {
+          // Get company profile and job count
+          const companyProfile = await db
+            .select()
+            .from(companies)
+            .where(eq(companies.userId, user.id))
+            .limit(1)
+
+          const jobCount = await db
+            .select({ count: count() })
+            .from(jobs)
+            .where(eq(jobs.companyId, companyProfile[0]?.id || ''))
+
+          additionalStats = {
+            jobsPosted: jobCount[0]?.count || 0,
+            profileComplete: companyProfile[0] ? 90 : 30, // Simple calculation
+          }
+        }
+
+        return {
+          id: user.id,
+          name: `${user.firstName} ${user.lastName}`,
+          email: user.email,
+          role: user.role,
+          status: user.status || 'active',
+          joinDate: user.createdAt.toISOString().split('T')[0],
+          lastActive: user.updatedAt.toISOString().split('T')[0],
+          ...additionalStats,
+        }
+      })
     )
-  }
 
-  return NextResponse.json({ users: filteredUsers })
+    return NextResponse.json({ users: usersWithStats })
+  } catch (error) {
+    console.error('Error fetching users:', error)
+    return NextResponse.json({ error: "Failed to fetch users" }, { status: 500 })
+  }
 }

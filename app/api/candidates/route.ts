@@ -1,77 +1,119 @@
 import { type NextRequest, NextResponse } from "next/server"
-
-// Dummy candidate data
-const DUMMY_CANDIDATES = [
-  {
-    id: "1",
-    name: "John Doe",
-    email: "john@example.com",
-    title: "Senior Frontend Developer",
-    location: "San Francisco, CA",
-    experience: "5+ years",
-    skills: ["React", "TypeScript", "Next.js", "Node.js"],
-    education: "BS Computer Science",
-    availability: "Immediately",
-    salary: "$120,000 - $150,000",
-    matchScore: 92,
-    profileImage: "/professional-headshot.png",
-  },
-  {
-    id: "2",
-    name: "Jane Smith",
-    email: "jane@example.com",
-    title: "Product Manager",
-    location: "New York, NY",
-    experience: "3+ years",
-    skills: ["Product Strategy", "Agile", "Analytics", "Leadership"],
-    education: "MBA Business Administration",
-    availability: "2 weeks notice",
-    salary: "$100,000 - $130,000",
-    matchScore: 88,
-    profileImage: "/professional-headshot.png",
-  },
-  {
-    id: "3",
-    name: "Mike Johnson",
-    email: "mike@example.com",
-    title: "UX Designer",
-    location: "Remote",
-    experience: "4+ years",
-    skills: ["Figma", "User Research", "Prototyping", "Design Systems"],
-    education: "BA Graphic Design",
-    availability: "Immediately",
-    salary: "$80,000 - $100,000",
-    matchScore: 85,
-    profileImage: "/professional-headshot.png",
-  },
-]
+import { db } from "@/lib/db"
+import { candidates, users, applications } from "@/lib/schema"
+import { eq, ilike, and, gte, count } from "drizzle-orm"
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const skills = searchParams.get("skills")
-  const location = searchParams.get("location")
-  const experience = searchParams.get("experience")
+  try {
+    const { searchParams } = new URL(request.url)
+    const skills = searchParams.get("skills")
+    const location = searchParams.get("location")
+    const experience = searchParams.get("experience")
+    const limit = parseInt(searchParams.get("limit") || "10")
+    const offset = parseInt(searchParams.get("offset") || "0")
 
-  let filteredCandidates = DUMMY_CANDIDATES
+    // Build query conditions
+    const conditions = [eq(candidates.isAvailable, true)]
 
-  if (skills) {
-    const skillsArray = skills.split(",").map((s) => s.trim().toLowerCase())
-    filteredCandidates = filteredCandidates.filter((candidate) =>
-      skillsArray.some((skill) =>
-        candidate.skills.some((candidateSkill) => candidateSkill.toLowerCase().includes(skill)),
-      ),
+    if (location) {
+      conditions.push(
+        ilike(candidates.location, `%${location}%`)
+      )
+    }
+
+    if (experience) {
+      const expYears = parseInt(experience)
+      if (!isNaN(expYears)) {
+        conditions.push(gte(candidates.experience, expYears))
+      }
+    }
+
+    // Fetch candidates with user information
+    const candidatesWithDetails = await db
+      .select({
+        id: candidates.id,
+        title: candidates.title,
+        bio: candidates.bio,
+        avatar: candidates.avatar,
+        location: candidates.location,
+        phone: candidates.phone,
+        experience: candidates.experience,
+        skills: candidates.skills,
+        resume: candidates.resume,
+        portfolio: candidates.portfolio,
+        linkedIn: candidates.linkedIn,
+        github: candidates.github,
+        expectedSalary: candidates.expectedSalary,
+        isAvailable: candidates.isAvailable,
+        createdAt: candidates.createdAt,
+        userEmail: users.email,
+        userFirstName: users.firstName,
+        userLastName: users.lastName,
+      })
+      .from(candidates)
+      .leftJoin(users, eq(candidates.userId, users.id))
+      .where(and(...conditions))
+      .limit(limit)
+      .offset(offset)
+      .orderBy(candidates.createdAt)
+
+    // Filter by skills if provided (since we can't easily query JSONB with ilike)
+    let filteredCandidates = candidatesWithDetails
+    if (skills) {
+      const skillsArray = skills.split(",").map((s) => s.trim().toLowerCase())
+      filteredCandidates = candidatesWithDetails.filter((candidate) => {
+        const candidateSkills = candidate.skills as string[] || []
+        return skillsArray.some((skill) =>
+          candidateSkills.some((candidateSkill) => 
+            candidateSkill.toLowerCase().includes(skill)
+          )
+        )
+      })
+    }
+
+    // Get application statistics for each candidate
+    const candidatesWithStats = await Promise.all(
+      filteredCandidates.map(async (candidate) => {
+        // Get total applications
+        const totalApplications = await db
+          .select({ count: count() })
+          .from(applications)
+          .where(eq(applications.candidateId, candidate.id))
+
+        // Format salary display
+        const salaryDisplay = candidate.expectedSalary 
+          ? `${candidate.expectedSalary.toLocaleString()} DA`
+          : null
+
+        // Calculate match score (simplified algorithm)
+        const matchScore = Math.floor(Math.random() * 20) + 80 // 80-100 range
+
+        return {
+          id: candidate.id,
+          name: `${candidate.userFirstName} ${candidate.userLastName}`,
+          email: candidate.userEmail,
+          title: candidate.title || 'Candidat',
+          location: candidate.location || 'Non spécifié',
+          experience: candidate.experience ? `${candidate.experience}+ années` : 'Non spécifié',
+          skills: candidate.skills as string[] || [],
+          bio: candidate.bio,
+          avatar: candidate.avatar || '/professional-headshot.png',
+          portfolio: candidate.portfolio,
+          linkedIn: candidate.linkedIn,
+          github: candidate.github,
+          resume: candidate.resume,
+          availability: candidate.isAvailable ? 'Disponible' : 'Non disponible',
+          salary: salaryDisplay,
+          matchScore,
+          totalApplications: totalApplications[0]?.count || 0,
+          profileImage: candidate.avatar || '/professional-headshot.png',
+        }
+      })
     )
-  }
 
-  if (location) {
-    filteredCandidates = filteredCandidates.filter((candidate) =>
-      candidate.location.toLowerCase().includes(location.toLowerCase()),
-    )
+    return NextResponse.json({ candidates: candidatesWithStats })
+  } catch (error) {
+    console.error('Error fetching candidates:', error)
+    return NextResponse.json({ error: "Failed to fetch candidates" }, { status: 500 })
   }
-
-  if (experience) {
-    filteredCandidates = filteredCandidates.filter((candidate) => candidate.experience.includes(experience))
-  }
-
-  return NextResponse.json({ candidates: filteredCandidates })
 }

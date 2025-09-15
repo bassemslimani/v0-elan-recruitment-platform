@@ -1,92 +1,164 @@
 import { type NextRequest, NextResponse } from "next/server"
-
-// Dummy job data
-const DUMMY_JOBS = [
-  {
-    id: "1",
-    title: "Senior Frontend Developer",
-    company: "TechCorp Inc.",
-    location: "San Francisco, CA",
-    type: "Full-time",
-    salary: "$120,000 - $150,000",
-    description: "We are looking for a senior frontend developer to join our team...",
-    requirements: ["React", "TypeScript", "Next.js", "5+ years experience"],
-    benefits: ["Health Insurance", "Remote Work", "401k", "Stock Options"],
-    postedDate: "2024-01-15",
-    applications: 45,
-    matchScore: 92,
-  },
-  {
-    id: "2",
-    title: "Product Manager",
-    company: "StartupXYZ",
-    location: "New York, NY",
-    type: "Full-time",
-    salary: "$100,000 - $130,000",
-    description: "Join our product team to drive innovation...",
-    requirements: ["Product Management", "Agile", "Analytics", "3+ years experience"],
-    benefits: ["Health Insurance", "Flexible Hours", "Learning Budget"],
-    postedDate: "2024-01-14",
-    applications: 32,
-    matchScore: 78,
-  },
-  {
-    id: "3",
-    title: "UX Designer",
-    company: "DesignStudio",
-    location: "Remote",
-    type: "Contract",
-    salary: "$80,000 - $100,000",
-    description: "Create amazing user experiences for our clients...",
-    requirements: ["Figma", "User Research", "Prototyping", "2+ years experience"],
-    benefits: ["Remote Work", "Flexible Schedule", "Creative Freedom"],
-    postedDate: "2024-01-13",
-    applications: 28,
-    matchScore: 85,
-  },
-]
+import { db } from "@/lib/db"
+import { jobs, companies, applications } from "@/lib/schema"
+import { eq, ilike, and, count } from "drizzle-orm"
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const search = searchParams.get("search")
-  const location = searchParams.get("location")
-  const type = searchParams.get("type")
+  try {
+    const { searchParams } = new URL(request.url)
+    const search = searchParams.get("search")
+    const location = searchParams.get("location")
+    const type = searchParams.get("type")
+    const limit = parseInt(searchParams.get("limit") || "10")
+    const offset = parseInt(searchParams.get("offset") || "0")
 
-  let filteredJobs = DUMMY_JOBS
+    // Build query conditions
+    const conditions = [eq(jobs.isActive, true)]
 
-  if (search) {
-    filteredJobs = filteredJobs.filter(
-      (job) =>
-        job.title.toLowerCase().includes(search.toLowerCase()) ||
-        job.company.toLowerCase().includes(search.toLowerCase()),
+    if (search) {
+      conditions.push(
+        ilike(jobs.title, `%${search}%`)
+      )
+    }
+
+    if (location) {
+      conditions.push(
+        ilike(jobs.location, `%${location}%`)
+      )
+    }
+
+    if (type) {
+      conditions.push(eq(jobs.type, type))
+    }
+
+    // Fetch jobs with company information and application count
+    const jobsWithDetails = await db
+      .select({
+        id: jobs.id,
+        title: jobs.title,
+        description: jobs.description,
+        requirements: jobs.requirements,
+        benefits: jobs.benefits,
+        location: jobs.location,
+        type: jobs.type,
+        level: jobs.level,
+        salaryMin: jobs.salaryMin,
+        salaryMax: jobs.salaryMax,
+        currency: jobs.currency,
+        skills: jobs.skills,
+        isRemote: jobs.isRemote,
+        createdAt: jobs.createdAt,
+        companyName: companies.name,
+        companyLogo: companies.logo,
+        companyIndustry: companies.industry,
+      })
+      .from(jobs)
+      .leftJoin(companies, eq(jobs.companyId, companies.id))
+      .where(and(...conditions))
+      .limit(limit)
+      .offset(offset)
+      .orderBy(jobs.createdAt)
+
+    // Get application counts for each job
+    const jobsWithApplications = await Promise.all(
+      jobsWithDetails.map(async (job) => {
+        const applicationCount = await db
+          .select({ count: count() })
+          .from(applications)
+          .where(eq(applications.jobId, job.id))
+
+        // Format salary display
+        const salaryDisplay = job.salaryMin && job.salaryMax 
+          ? `${job.salaryMin.toLocaleString()} - ${job.salaryMax.toLocaleString()} ${job.currency}`
+          : null
+
+        // Calculate days since posted
+        const daysSincePosted = Math.floor(
+          (Date.now() - new Date(job.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+        )
+        const postedAt = daysSincePosted === 0 
+          ? "Aujourd'hui" 
+          : daysSincePosted === 1 
+          ? "Il y a 1 jour" 
+          : `Il y a ${daysSincePosted} jours`
+
+        return {
+          id: job.id,
+          title: job.title,
+          company: job.companyName,
+          location: job.location,
+          type: job.type,
+          level: job.level,
+          salary: salaryDisplay,
+          description: job.description,
+          requirements: job.requirements,
+          benefits: job.benefits,
+          skills: job.skills,
+          isRemote: job.isRemote,
+          postedAt,
+          applications: applicationCount[0]?.count || 0,
+          companyLogo: job.companyLogo,
+          companyIndustry: job.companyIndustry,
+        }
+      })
     )
-  }
 
-  if (location) {
-    filteredJobs = filteredJobs.filter((job) => job.location.toLowerCase().includes(location.toLowerCase()))
+    return NextResponse.json({ jobs: jobsWithApplications })
+  } catch (error) {
+    console.error('Error fetching jobs:', error)
+    return NextResponse.json({ error: "Failed to fetch jobs" }, { status: 500 })
   }
-
-  if (type) {
-    filteredJobs = filteredJobs.filter((job) => job.type === type)
-  }
-
-  return NextResponse.json({ jobs: filteredJobs })
 }
 
 export async function POST(request: NextRequest) {
   try {
     const jobData = await request.json()
 
-    const newJob = {
-      id: Math.random().toString(36).substr(2, 9),
-      ...jobData,
-      postedDate: new Date().toISOString().split("T")[0],
-      applications: 0,
-      matchScore: Math.floor(Math.random() * 30) + 70,
+    // Validate required fields
+    const { 
+      companyId, 
+      title, 
+      description, 
+      location, 
+      type, 
+      requirements, 
+      benefits, 
+      skills,
+      salaryMin,
+      salaryMax,
+      level,
+      isRemote = false,
+      applicationDeadline
+    } = jobData
+
+    if (!companyId || !title || !description || !location || !type) {
+      return NextResponse.json(
+        { error: "Missing required fields" }, 
+        { status: 400 }
+      )
     }
 
-    return NextResponse.json({ job: newJob })
+    // Create new job in database
+    const newJob = await db.insert(jobs).values({
+      companyId,
+      title,
+      description,
+      requirements,
+      benefits,
+      location,
+      type,
+      level,
+      salaryMin: salaryMin ? parseFloat(salaryMin) : null,
+      salaryMax: salaryMax ? parseFloat(salaryMax) : null,
+      skills,
+      isRemote,
+      applicationDeadline: applicationDeadline ? new Date(applicationDeadline) : null,
+      isActive: true,
+    }).returning()
+
+    return NextResponse.json({ job: newJob[0] }, { status: 201 })
   } catch (error) {
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    console.error('Error creating job:', error)
+    return NextResponse.json({ error: "Failed to create job" }, { status: 500 })
   }
 }

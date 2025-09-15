@@ -1,56 +1,86 @@
 import { type NextRequest, NextResponse } from "next/server"
-
-// Dummy user data for authentication
-const DUMMY_USERS = [
-  {
-    id: "1",
-    email: "client@example.com",
-    password: "password123",
-    role: "client",
-    name: "John Doe",
-    profileComplete: 85,
-  },
-  {
-    id: "2",
-    email: "company@example.com",
-    password: "password123",
-    role: "company",
-    name: "TechCorp Inc.",
-    profileComplete: 90,
-  },
-  {
-    id: "3",
-    email: "admin@example.com",
-    password: "password123",
-    role: "admin",
-    name: "Admin User",
-    profileComplete: 100,
-  },
-]
+import { db } from "@/lib/db"
+import { users, candidates, companies } from "@/lib/schema"
+import { eq } from "drizzle-orm"
+import bcrypt from "bcryptjs"
 
 export async function POST(request: NextRequest) {
   try {
     const { email, password } = await request.json()
 
-    // Find user in dummy data
-    const user = DUMMY_USERS.find((u) => u.email === email && u.password === password)
+    if (!email || !password) {
+      return NextResponse.json({ error: "Email and password are required" }, { status: 400 })
+    }
 
-    if (!user) {
+    // Find user in database
+    const user = await db
+      .select({
+        id: users.id,
+        email: users.email,
+        password: users.password,
+        role: users.role,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        status: users.status,
+      })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1)
+
+    if (!user.length) {
       return NextResponse.json({ error: "Invalid credentials" }, { status: 401 })
+    }
+
+    const foundUser = user[0]
+
+    // Check if user is active
+    if (foundUser.status !== 'active') {
+      return NextResponse.json({ error: "Account is not active" }, { status: 401 })
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, foundUser.password)
+
+    if (!isPasswordValid) {
+      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 })
+    }
+
+    // Calculate profile completeness
+    let profileComplete = 50 // Base score
+    
+    if (foundUser.role === 'client') {
+      const candidateProfile = await db
+        .select()
+        .from(candidates)
+        .where(eq(candidates.userId, foundUser.id))
+        .limit(1)
+      
+      profileComplete = candidateProfile.length > 0 ? 85 : 30
+    } else if (foundUser.role === 'company') {
+      const companyProfile = await db
+        .select()
+        .from(companies)
+        .where(eq(companies.userId, foundUser.id))
+        .limit(1)
+      
+      profileComplete = companyProfile.length > 0 ? 90 : 40
+    } else if (foundUser.role === 'admin') {
+      profileComplete = 100
     }
 
     // Return user data (in real app, you'd generate a JWT token)
     return NextResponse.json({
       user: {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        name: user.name,
-        profileComplete: user.profileComplete,
+        id: foundUser.id,
+        email: foundUser.email,
+        role: foundUser.role,
+        name: `${foundUser.firstName} ${foundUser.lastName}`,
+        profileComplete,
       },
-      token: `dummy-token-${user.id}`,
+      token: `auth-token-${foundUser.id}-${Date.now()}`,
     })
   } catch (error) {
+    console.error('Login error:', error)
     return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }
